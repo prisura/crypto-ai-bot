@@ -4,9 +4,9 @@ import json
 import requests
 import pandas as pd
 import streamlit as st
-from datetime import datetime
+import random
+from datetime import datetime, timedelta
 from openai import OpenAI
-# Імпортуємо стабільний хмарний віджет для автооновлення сторінки
 from streamlit_autorefresh import st_autorefresh
 
 # 1. Завантаження конфігурації
@@ -30,10 +30,23 @@ else:
 if "signals_history" not in st.session_state:
     st.session_state.signals_history = []
 
-# --- ФУНКЦІЇ АНАЛІТИКИ ---
+# --- СИНХРОНІЗОВАНІ ФУНКЦІЇ АНАЛІТИКИ (ПРИВ'ЯЗКА ДО ХВИЛИНИ ЧАСУ) ---
+
+def get_synchronized_seed():
+    """ 
+    Генерує унікальне число (seed) на основі поточної хвилини.
+    Це гарантує, що всі вікна, запущені в одну і ту саму хвилину,
+    отримають абсолютно однакові випадкові дані.
+    """
+    now = datetime.now()
+    # Створюємо seed у форматі РРРРММДДГГХХ (наприклад, 202607161120)
+    return int(now.strftime("%Y%m%d%H%M"))
 
 def get_smart_money_activity():
-    import random
+    # Фіксуємо seed для цієї хвилини
+    seed_value = get_synchronized_seed()
+    random.seed(seed_value)
+    
     test_coins = [
         "BTC", "ETH", "SOL", "XRP", "ADA", 
         "AVAX", "DOT", "DOGE", "SHIB", "LINK", 
@@ -43,41 +56,59 @@ def get_smart_money_activity():
     chosen_coin = random.choice(test_coins)
     action = random.choice(["BUY", "SELL"])
     
+    # Генерація фіксованих транзакцій на основі тієї ж хвилини
+    amount_1 = random.randint(100, 500) * 1000
+    amount_2 = random.randint(50, 200) * 1000
+    
     if action == "BUY":
         transfers = [
-            {"token": chosen_coin, "wallet_tag": "Jump Crypto", "action": "BUY", "amount_usd": 150000, "timestamp": time.time()},
-            {"token": chosen_coin, "wallet_tag": "Smart Money #042", "action": "BUY", "amount_usd": 85000, "timestamp": time.time() - 300},
-            {"token": chosen_coin, "wallet_tag": "a16z", "action": "BUY", "amount_usd": 300000, "timestamp": time.time() - 1200}
+            {"token": chosen_coin, "wallet_tag": "Jump Crypto", "action": "BUY", "amount_usd": amount_1, "timestamp": time.time()},
+            {"token": chosen_coin, "wallet_tag": "Smart Money #042", "action": "BUY", "amount_usd": amount_2, "timestamp": time.time() - 300}
         ]
     else:
         transfers = [
-            {"token": chosen_coin, "wallet_tag": "Paradigm", "action": "TRANSFER_TO_BINANCE", "amount_usd": 450000, "timestamp": time.time()},
-            {"token": chosen_coin, "wallet_tag": "Smart Money #011", "action": "SELL", "amount_usd": 120000, "timestamp": time.time() - 150}
+            {"token": chosen_coin, "wallet_tag": "Paradigm", "action": "TRANSFER_TO_BINANCE", "amount_usd": amount_1, "timestamp": time.time()},
+            {"token": chosen_coin, "wallet_tag": "Smart Money #011", "action": "SELL", "amount_usd": amount_2, "timestamp": time.time() - 150}
         ]
+    
+    # Обов'язково скидаємо генератор у випадковий стан для інших системних бібліотек
+    random.seed()
     return chosen_coin, action, transfers
 
 def get_market_metrics(symbol, action):
+    # Прив'язуємо метрики до seed хвилини
+    seed_value = get_synchronized_seed()
+    random.seed(seed_value + 1)
+    
     if action == "BUY":
-        return {"funding_rate": -0.004, "open_interest_change_pct": 11.2}
+        funding = round(random.uniform(-0.005, -0.001), 4)
+        oi_change = round(random.uniform(5.0, 15.0), 1)
     else:
-        return {"funding_rate": 0.008, "open_interest_change_pct": -5.4}
+        funding = round(random.uniform(0.003, 0.01), 4)
+        oi_change = round(random.uniform(-8.0, -2.0), 1)
+        
+    random.seed()
+    return {"funding_rate": funding, "open_interest_change_pct": oi_change}
 
 def get_arbitrage_opportunities(symbol, action):
-    import random
+    seed_value = get_synchronized_seed()
+    random.seed(seed_value + 2)
+    
+    spread_bybit_bingx = round(random.uniform(0.1, 0.5), 2)
+    
     if action == "BUY":
-        spread_bybit_bingx = round(random.uniform(0.15, 0.45), 2)
         data = {
             "best_exchange": "BingX",
             "spread": f"{spread_bybit_bingx}%",
             "interpretation": f"BingX відстає від тренду Bybit на {spread_bybit_bingx}%."
         }
     else:
-        spread_bybit_bingx = round(random.uniform(0.1, 0.35), 2)
         data = {
             "best_exchange": "Bybit (Short)",
             "spread": f"{spread_bybit_bingx}%",
             "interpretation": f"На Bybit продажі, BingX тримається."
         }
+    random.seed()
     return data
 
 def get_mock_price(symbol):
@@ -86,7 +117,7 @@ def get_mock_price(symbol):
         res = requests.get(url).json()
         return float(res['price'])
     except:
-        prices = {"BTC": 64000.0, "ETH": 3400.0, "SOL": 140.0, "XRP": 0.5, "ADA": 0.38}
+        prices = {"BTC": 64000.0, "ETH": 3400.0, "SOL": 140.0, "XRP": 1.11, "ADA": 0.38}
         return prices.get(symbol, 1.0)
 
 def ask_openai_decision(token, onchain_data, market_metrics, arbitrage_data):
@@ -122,7 +153,6 @@ def ask_openai_decision(token, onchain_data, market_metrics, arbitrage_data):
         return {"decision": "HOLD", "reason": f"Помилка ШІ: {e}"}
 
 def perform_scan(sl_pct, tp_pct):
-    """ Функція, що виконує один цикл сканування та додає дані в історію """
     token, action, onchain = get_smart_money_activity()
     metrics = get_market_metrics(token, action)
     arb = get_arbitrage_opportunities(token, action)
@@ -144,8 +174,12 @@ def perform_scan(sl_pct, tp_pct):
         sl, tp = 0.0, 0.0
         side = "⚪ HOLD"
 
+    # Заокруглюємо час сигналу до початку поточної хвилини, 
+    # щоб час відображення в усіх таблицях також повністю збігався
+    sync_time = datetime.now().replace(second=0, microsecond=0).strftime("%H:%M:%S")
+
     new_signal = {
-        "Час": datetime.now().strftime("%H:%M:%S"),
+        "Час": sync_time,
         "Монета": f"{token}/USDT",
         "Напрямок": side,
         "Ціна входу": f"{price:.4f}",
@@ -155,7 +189,10 @@ def perform_scan(sl_pct, tp_pct):
         "Спред": arb.get("spread", "-"),
         "Аналітика від ШІ": reason
     }
-    st.session_state.signals_history.insert(0, new_signal)
+    
+    # Захист від дублікатів: додаємо сигнал лише якщо такого самого за цей час ще немає в історії
+    if not any(s["Час"] == sync_time and s["Монета"] == f"{token}/USDT" for s in st.session_state.signals_history):
+        st.session_state.signals_history.insert(0, new_signal)
 
 # --- ВЕБ-ІНТЕРФЕЙС STREAMLIT ---
 
@@ -177,25 +214,23 @@ if not openai_client:
     st.error("⚠️ Помилка: Ключ OPENAI_API_KEY не знайдено!")
     st.stop()
 
-# НАДІЙНА ТА БЕЗПЕЧНА ЛОГІКА АВТООНОВЛЕННЯ ДЛЯ ХМАРИ СТРИМЛІТ
+# НАДІЙНА ЛОГІКА АВТООНОВЛЕННЯ
 if auto_refresh:
-    # Запускаємо офіційний фоновий віджет-таймер (інтервал у мілісекундах)
-    # Він змусить сторінку оновлюватися саму БЕЗ використання примусового засинання time.sleep()
+    # Запускаємо таймер оновлення сторінки
     st_autorefresh(interval=scan_interval * 1000, key="crypto_bot_refresh")
     
-    # Використовуємо сесійний стан для відстеження часу останнього аналізу ринку
     if "last_scan_time" not in st.session_state:
         st.session_state.last_scan_time = time.time()
-        perform_scan(sl_pct, tp_pct)  # Робимо перший скан при найпершому старті сторінки
+        perform_scan(sl_pct, tp_pct)
         
     current_time = time.time()
     if current_time - st.session_state.last_scan_time >= scan_interval:
         st.session_state.last_scan_time = current_time
         perform_scan(sl_pct, tp_pct)
 
-# Кнопка ручного керування (завжди активна)
+# Кнопка примусового сканування
 if st.button("⚡ Примусове сканування прямо зараз"):
-    with St.spinner("Аналіз даних..."):
+    with st.spinner("Аналіз даних..."):
         perform_scan(sl_pct, tp_pct)
         st.session_state.last_scan_time = time.time()
         st.rerun()
@@ -218,4 +253,4 @@ if st.session_state.signals_history:
         st.session_state.signals_history = []
         st.rerun()
 else:
-    st.info("Таблиця порожня. Натисніть кнопку 'Примусове сканування' або зачекайте запуску таймера автооновлення.")
+    st.info("Таблиця порожня. Натисніть кнопку 'Примусове сканування' або зачекайте запуску таймера.")
