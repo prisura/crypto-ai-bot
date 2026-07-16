@@ -4,14 +4,16 @@ import json
 import requests
 import pandas as pd
 import streamlit as st
-from dotenv import load_dotenv
-from openai import OpenAI
 from datetime import datetime
+from openai import OpenAI
+# Імпортуємо стабільний хмарний віджет для автооновлення сторінки
+from streamlit_autorefresh import st_autorefresh
 
 # 1. Завантаження конфігурації
+from dotenv import load_dotenv
 load_dotenv()
 
-# 2. Налаштування сторінки Streamlit (Веб-версії)
+# 2. Налаштування сторінки Streamlit
 st.set_page_config(
     page_title="ШІ-Порадник Крипто-Арбітражу",
     page_icon="🤖",
@@ -24,7 +26,7 @@ if "OPENAI_API_KEY" in os.environ or os.getenv("OPENAI_API_KEY"):
 else:
     openai_client = None
 
-# Ініціалізація історії сигналів у пам'яті веб-додатка
+# Ініціалізація історії сигналів у пам'яті додатка
 if "signals_history" not in st.session_state:
     st.session_state.signals_history = []
 
@@ -64,7 +66,6 @@ def get_arbitrage_opportunities(symbol, action):
     import random
     if action == "BUY":
         spread_bybit_bingx = round(random.uniform(0.15, 0.45), 2)
-        spread_dex = round(random.uniform(0.5, 1.2), 2)
         data = {
             "best_exchange": "BingX",
             "spread": f"{spread_bybit_bingx}%",
@@ -75,7 +76,7 @@ def get_arbitrage_opportunities(symbol, action):
         data = {
             "best_exchange": "Bybit (Short)",
             "spread": f"{spread_bybit_bingx}%",
-            "interpretation": f"На Bybit почалися продажі, BingX тримається."
+            "interpretation": f"На Bybit продажі, BingX тримається."
         }
     return data
 
@@ -90,25 +91,20 @@ def get_mock_price(symbol):
 
 def ask_openai_decision(token, onchain_data, market_metrics, arbitrage_data):
     if not openai_client:
-        return {"decision": "HOLD", "reason": "Ключ OpenAI API не знайдено в налаштуваннях."}
+        return {"decision": "HOLD", "reason": "Ключ OpenAI API не знайдено."}
         
     prompt = f"""
     Ти професійний крипто-трейдер та арбітражник. 
     Проаналізуй наступні дані для токена {token} та ухвали рішення про доцільність угоди.
     
-    1. Дані On-chain (Smart Money):
-    {json.dumps(onchain_data, indent=2)}
-    
-    2. Метрики ринку (Ставка фінансування):
-    {json.dumps(market_metrics, indent=2)}
-    
-    3. Дані міжбіржового арбітражу:
-    {json.dumps(arbitrage_data, indent=2)}
+    1. Дані On-chain: {json.dumps(onchain_data)}
+    2. Метрики ринку: {json.dumps(market_metrics)}
+    3. Дані арбітражу: {json.dumps(arbitrage_data)}
     
     Поверни відповідь у форматі JSON:
     {{
         "decision": "BUY" або "SELL" або "HOLD",
-        "reason": "коротке, чітке обґрунтування українською мовою з рекомендацією біржі"
+        "reason": "коротке, чітке обґрунтування українською мовою"
     }}
     """
     try:
@@ -125,74 +121,90 @@ def ask_openai_decision(token, onchain_data, market_metrics, arbitrage_data):
     except Exception as e:
         return {"decision": "HOLD", "reason": f"Помилка ШІ: {e}"}
 
+def perform_scan(sl_pct, tp_pct):
+    """ Функція, що виконує один цикл сканування та додає дані в історію """
+    token, action, onchain = get_smart_money_activity()
+    metrics = get_market_metrics(token, action)
+    arb = get_arbitrage_opportunities(token, action)
+    
+    ai_res = ask_openai_decision(token, onchain, metrics, arb)
+    decision = ai_res.get("decision", "HOLD")
+    reason = ai_res.get("reason", "Сигнал слабкий.")
+    
+    price = get_mock_price(token)
+    if decision == "BUY":
+        sl = price * (1.0 - sl_pct)
+        tp = price * (1.0 + tp_pct)
+        side = "🟢 LONG"
+    elif decision == "SELL":
+        sl = price * (1.0 + sl_pct)
+        tp = price * (1.0 - tp_pct)
+        side = "🔴 SHORT"
+    else:
+        sl, tp = 0.0, 0.0
+        side = "⚪ HOLD"
+
+    new_signal = {
+        "Час": datetime.now().strftime("%H:%M:%S"),
+        "Монета": f"{token}/USDT",
+        "Напрямок": side,
+        "Ціна входу": f"{price:.4f}",
+        "Stop-Loss": f"{sl:.4f}" if sl > 0 else "-",
+        "Take-Profit": f"{tp:.4f}" if tp > 0 else "-",
+        "Рекомендована біржа": arb.get("best_exchange", "Bybit"),
+        "Спред": arb.get("spread", "-"),
+        "Аналітика від ШІ": reason
+    }
+    st.session_state.signals_history.insert(0, new_signal)
+
 # --- ВЕБ-ІНТЕРФЕЙС STREAMLIT ---
 
 st.title("🤖 ШІ-Порадник Крипто-Інсайдів та Арбітражу")
 st.write("Веб-платформа для моніторингу аномалій Smart Money та міжбіржових спредів (Bybit/BingX) в реальному часі.")
 
-# Бокова панель (Sidebar) з налаштуваннями ризиків та інтервалу
+# Бокова панель
 st.sidebar.header("⚙️ Налаштування системи")
-trade_volume = st.sidebar.number_input("Обсяг угоди, USDT", value=float(os.getenv("TRADE_VOLUME_USDT", 10.0)))
-sl_pct = st.sidebar.slider("Stop-Loss, %", min_value=1.0, max_value=5.0, value=float(os.getenv("STOP_LOSS_PCT", 0.02))*100) / 100
-tp_pct = st.sidebar.slider("Take-Profit, %", min_value=2.0, max_value=15.0, value=float(os.getenv("TAKE_PROFIT_PCT", 0.06))*100) / 100
-scan_interval = st.sidebar.slider("Інтервал сканування (сек)", min_value=10, max_value=300, value=int(os.getenv("SCAN_INTERVAL_SEC", 60)))
+trade_volume = st.sidebar.number_input("Обсяг угоди, USDT", value=10.0)
+sl_pct = st.sidebar.slider("Stop-Loss, %", min_value=1.0, max_value=5.0, value=2.0) / 100
+tp_pct = st.sidebar.slider("Take-Profit, %", min_value=2.0, max_value=15.0, value=6.0) / 100
 
-# Перевірка ключів
+# Вибір режиму оновлення
+st.sidebar.markdown("---")
+auto_refresh = st.sidebar.checkbox("🔄 Увімкнути автоматичне оновлення", value=True)
+scan_interval = st.sidebar.slider("Інтервал сканування (сек)", min_value=10, max_value=300, value=60)
+
 if not openai_client:
-    st.error("⚠️ Помилка: Ключ OPENAI_API_KEY не знайдено! Додайте його у ваш файл .env.")
+    st.error("⚠️ Помилка: Ключ OPENAI_API_KEY не знайдено!")
     st.stop()
 
-# Кнопка для ручного запуску нового циклу сканування
-if st.button("🔄 Сканувати ринок прямо зараз"):
-    with st.spinner("Отримання та аналіз даних..."):
-        token, action, onchain = get_smart_money_activity()
-        metrics = get_market_metrics(token, action)
-        arb = get_arbitrage_opportunities(token, action)
+# НАДІЙНА ТА БЕЗПЕЧНА ЛОГІКА АВТООНОВЛЕННЯ ДЛЯ ХМАРИ СТРИМЛІТ
+if auto_refresh:
+    # Запускаємо офіційний фоновий віджет-таймер (інтервал у мілісекундах)
+    # Він змусить сторінку оновлюватися саму БЕЗ використання примусового засинання time.sleep()
+    st_autorefresh(interval=scan_interval * 1000, key="crypto_bot_refresh")
+    
+    # Використовуємо сесійний стан для відстеження часу останнього аналізу ринку
+    if "last_scan_time" not in st.session_state:
+        st.session_state.last_scan_time = time.time()
+        perform_scan(sl_pct, tp_pct)  # Робимо перший скан при найпершому старті сторінки
         
-        # Запит до ШІ
-        ai_res = ask_openai_decision(token, onchain, metrics, arb)
-        decision = ai_res.get("decision", "HOLD")
-        reason = ai_res.get("reason", "Сигнал слабкий.")
-        
-        # Розрахунок цін
-        price = get_mock_price(token)
-        if decision == "BUY":
-            sl = price * (1.0 - sl_pct)
-            tp = price * (1.0 + tp_pct)
-            side = "🟢 LONG"
-        elif decision == "SELL":
-            sl = price * (1.0 + sl_pct)
-            tp = price * (1.0 - tp_pct)
-            side = "🔴 SHORT"
-        else:
-            sl, tp = 0.0, 0.0
-            side = "⚪ HOLD"
+    current_time = time.time()
+    if current_time - st.session_state.last_scan_time >= scan_interval:
+        st.session_state.last_scan_time = current_time
+        perform_scan(sl_pct, tp_pct)
 
-        # Запис у пам'ять
-        new_signal = {
-            "Час": datetime.now().strftime("%H:%M:%S"),
-            "Монета": f"{token}/USDT",
-            "Напрямок": side,
-            "Ціна входу": f"{price:.4f}",
-            "Stop-Loss": f"{sl:.4f}" if sl > 0 else "-",
-            "Take-Profit": f"{tp:.4f}" if tp > 0 else "-",
-            "Рекомендована біржа": arb.get("best_exchange", "Bybit"),
-            "Спред": arb.get("spread", "-"),
-            "Аналітика від ШІ": reason
-        }
-        
-        # Додаємо на початок списку (щоб свіжі були зверху)
-        st.session_state.signals_history.insert(0, new_signal)
+# Кнопка ручного керування (завжди активна)
+if st.button("⚡ Примусове сканування прямо зараз"):
+    with St.spinner("Аналіз даних..."):
+        perform_scan(sl_pct, tp_pct)
+        st.session_state.last_scan_time = time.time()
+        st.rerun()
 
 # --- ВІДОБРАЖЕННЯ ТАБЛИЦІ СИГНАЛІВ ---
-
 st.subheader("📊 Онлайн Таблиця Торгових Сигналів")
 
 if st.session_state.signals_history:
-    # Перетворюємо історію сигналів у красиву таблицю Pandas
     df = pd.DataFrame(st.session_state.signals_history)
-    
-    # Виводимо інтерактивну таблицю на весь екран
     st.dataframe(
         df,
         use_container_width=True,
@@ -202,12 +214,8 @@ if st.session_state.signals_history:
         }
     )
     
-    # Окремий блок для швидкого очищення таблиці
     if st.button("🗑️ Очистити історію таблиці"):
         st.session_state.signals_history = []
-        st.experimental_rerun()
+        st.rerun()
 else:
-    st.info("Таблиця порожня. Натисніть кнопку 'Сканувати ринок прямо зараз', щоб ШІ проаналізував свіжі інсайди.")
-
-# Автооновлення сторінки кожні Х секунд для імітації онлайн-стриму
-st.caption(f"Налаштовано інтервал автоматичного оновлення дашборду. Натисніть кнопку сканування для примусового оновлення таблиці.")
+    st.info("Таблиця порожня. Натисніть кнопку 'Примусове сканування' або зачекайте запуску таймера автооновлення.")
